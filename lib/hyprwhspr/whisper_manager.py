@@ -14,6 +14,7 @@ import io
 from contextlib import contextmanager
 from io import BytesIO
 from typing import Optional
+from pathlib import Path
 
 try:
     import numpy as np
@@ -483,9 +484,9 @@ class WhisperManager:
 
             # Fill prompt from config if not provided
             if 'prompt' not in extra_body:
-                whisper_prompt = self.config.get_setting('whisper_prompt', None)
-                if whisper_prompt:
-                    extra_body['prompt'] = whisper_prompt
+                initial_prompt = self._get_initial_prompt()
+                if initial_prompt:
+                    extra_body['prompt'] = initial_prompt
 
             if not endpoint_url:
                 raise ValueError('REST endpoint URL not configured')
@@ -593,6 +594,25 @@ class WhisperManager:
             print(f'ERROR: REST transcription failed: {e}')
             return ''
 
+    def _get_initial_prompt(self) -> Optional[str]:
+        """Get initial prompt from prompt.txt or config"""
+        # Try finding prompt.txt in project root
+        try:
+            # Resolving relative to this file: lib/hyprwhspr/whisper_manager.py -> root
+            root_dir = Path(__file__).resolve().parent.parent.parent
+            prompt_file = root_dir / 'prompt.txt'
+            
+            if prompt_file.exists():
+                txt = prompt_file.read_text(encoding='utf-8').strip()
+                if txt:
+                    print(f"Loaded prompt from {prompt_file} ({len(txt)} chars)")
+                    return txt
+        except Exception as e:
+            print(f"[WARN] Error reading prompt.txt: {e}")
+            
+        # Fallback to config
+        return self.config.get_setting('whisper_prompt', None)
+
     def is_ready(self) -> bool:
         """Check if whisper is ready for transcription"""
         return self.ready
@@ -650,10 +670,15 @@ class WhisperManager:
             # Intercept progress logs and enhance them
             with self._intercept_progress_logs():
                 # Transcribe with language parameter if specified
+                params = {}
                 if language:
-                    segments = self._pywhisper_model.transcribe(audio_data, language=language)
-                else:
-                    segments = self._pywhisper_model.transcribe(audio_data)
+                    params['language'] = language
+                
+                initial_prompt = self._get_initial_prompt()
+                if initial_prompt:
+                    params['initial_prompt'] = initial_prompt
+
+                segments = self._pywhisper_model.transcribe(audio_data, **params)
 
             result = ' '.join(seg.text for seg in segments).strip()
             return result
