@@ -1,13 +1,13 @@
 {
   "custom/hyprwhspr": {
     "format": "{}",
-    "exec": "/usr/lib/hyprwhspr/config/hyprland/hyprwhspr-tray.sh status",
+    "exec": "uv run /home/andrew/vui/hyprwhspr/config/hyprland/hyprwhspr-tray.sh status",
     "interval": 1,
     "return-type": "json",
     "exec-on-event": true,
-    "on-click": "/usr/lib/hyprwhspr/config/hyprland/hyprwhspr-tray.sh toggle",
-    "on-click-right": "/usr/lib/hyprwhspr/config/hyprland/hyprwhspr-tray.sh start",
-    "on-click-middle": "/usr/lib/hyprwhspr/config/hyprland/hyprwhspr-tray.sh restart",
+    "on-click": "uv run /home/andrew/vui/hyprwhspr/config/hyprland/hyprwhspr-tray.sh toggle",
+    "on-click-right": "uv run /home/andrew/vui/hyprwhspr/config/hyprland/hyprwhspr-tray.sh start",
+    "on-click-middle": "uv run /home/andrew/vui/hyprwhspr/config/hyprland/hyprwhspr-tray.sh restart",
     "tooltip": true
   }
 }

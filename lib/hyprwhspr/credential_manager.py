@@ -8,10 +8,7 @@ import os
 from pathlib import Path
 from typing import Dict, Optional
 
-try:
-    from .output_control import log_info, log_error, log_warning
-except ImportError:
-    from output_control import log_info, log_error, log_warning
+from .output_control import log_info, log_error, log_warning
 
 
 # Credentials file location

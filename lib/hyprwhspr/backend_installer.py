@@ -14,16 +14,11 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict
 
 # Import output control system
-try:
-    from .output_control import (
-        log_info, log_success, log_warning, log_error, log_debug, log_verbose,
-        run_command, OutputController, VerbosityLevel
-    )
-except ImportError:
-    from output_control import (
-        log_info, log_success, log_warning, log_error, log_debug, log_verbose,
-        run_command, OutputController, VerbosityLevel
-    )
+from .output_control import (
+    log_info, log_success, log_warning, log_error, log_debug, log_verbose,
+    run_command, OutputController, VerbosityLevel
+)
+from . import get_project_root
 
 
 def run_sudo_command(cmd: list, check: bool = True, input_data: Optional[bytes] = None,
@@ -34,7 +29,7 @@ def run_sudo_command(cmd: list, check: bool = True, input_data: Optional[bytes] 
 
 
 # Constants
-HYPRWHSPR_ROOT = os.environ.get('HYPRWHSPR_ROOT', '/usr/lib/hyprwhspr')
+HYPRWHSPR_ROOT = str(get_project_root())
 USER_BASE = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local' / 'share')) / 'hyprwhspr'
 VENV_DIR = USER_BASE / 'venv'
 PYWHISPERCPP_MODELS_DIR = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local' / 'share')) / 'pywhispercpp' / 'models'
@@ -43,7 +38,8 @@ STATE_FILE = STATE_DIR / 'install-state.json'
 PYWHISPERCPP_SRC_DIR = USER_BASE / 'pywhispercpp-src'
 PYWHISPERCPP_PINNED_COMMIT = "4ab96165f84e8eb579077dfc3d0476fa5606affe"
 PARAKEET_VENV_DIR = USER_BASE / 'parakeet-venv'
-PARAKEET_DIR = Path(HYPRWHSPR_ROOT) / 'lib' / 'backends' / 'parakeet'
+# Backends are now inside the package
+PARAKEET_DIR = Path(__file__).parent / 'backends' / 'parakeet'
 PARAKEET_SCRIPT = PARAKEET_DIR / 'parakeet-tdt-0.6b-v3.py'
 PARAKEET_REQUIREMENTS = PARAKEET_DIR / 'requirements.txt'
 

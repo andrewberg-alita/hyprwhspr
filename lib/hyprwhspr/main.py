@@ -12,20 +12,16 @@ import fcntl
 import atexit
 from pathlib import Path
 
-# Add the src directory to the Python path
-src_path = Path(__file__).parent / 'src'
-sys.path.insert(0, str(src_path))
-
 # Lock file for preventing multiple instances
 _lock_file = None
 _lock_file_path = None
 
-from config_manager import ConfigManager
-from audio_capture import AudioCapture
-from whisper_manager import WhisperManager
-from text_injector import TextInjector
-from global_shortcuts import GlobalShortcuts
-from audio_manager import AudioManager
+from .config_manager import ConfigManager
+from .audio_capture import AudioCapture
+from .whisper_manager import WhisperManager
+from .text_injector import TextInjector
+from .global_shortcuts import GlobalShortcuts
+from .audio_manager import AudioManager
 
 class hyprwhsprApp:
     """Main application class for hyprwhspr voice dictation (Headless Mode)"""
@@ -420,7 +416,7 @@ def _release_lock_file():
 def _is_hyprwhspr_running():
     """Check if hyprwhspr is already running"""
     try:
-        from instance_detection import is_hyprwhspr_running
+        from .instance_detection import is_hyprwhspr_running
         return is_hyprwhspr_running()
     except ImportError:
         # Fallback if import fails (shouldn't happen in normal operation)

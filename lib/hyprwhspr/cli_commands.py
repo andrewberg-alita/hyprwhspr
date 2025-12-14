@@ -22,60 +22,29 @@ except (ImportError, ModuleNotFoundError) as e:
     print("  pip install rich>=13.0.0  # or via pip", file=sys.stderr)
     sys.exit(1)
 
-try:
-    from .config_manager import ConfigManager
-except ImportError:
-    from config_manager import ConfigManager
-
-try:
-    from .backend_installer import (
-        install_backend, VENV_DIR, STATE_FILE, STATE_DIR,
-        get_install_state, set_install_state, get_all_state,
-        init_state, _cleanup_partial_installation,
-        PARAKEET_VENV_DIR, PARAKEET_SCRIPT, USER_BASE, PYWHISPERCPP_SRC_DIR
-    )
-except ImportError:
-    from backend_installer import (
-        install_backend, VENV_DIR, STATE_FILE, STATE_DIR,
-        get_install_state, set_install_state, get_all_state,
-        init_state, _cleanup_partial_installation,
-        PARAKEET_VENV_DIR, PARAKEET_SCRIPT, USER_BASE, PYWHISPERCPP_SRC_DIR
-    )
-
-try:
-    from .provider_registry import (
-        PROVIDERS, get_provider, list_providers, get_provider_models,
-        get_model_config, validate_api_key
-    )
-except ImportError:
-    from provider_registry import (
-        PROVIDERS, get_provider, list_providers, get_provider_models,
-        get_model_config, validate_api_key
-    )
-
-try:
-    from .credential_manager import (
-        save_credential, get_credential, mask_api_key, CREDENTIALS_FILE
-    )
-except ImportError:
-    from credential_manager import (
-        save_credential, get_credential, mask_api_key, CREDENTIALS_FILE
-    )
-
-try:
-    from .output_control import (
-        log_info, log_success, log_warning, log_error, log_debug, log_verbose,
-        run_command, run_sudo_command, OutputController, VerbosityLevel
-    )
-except ImportError:
-    from output_control import (
-        log_info, log_success, log_warning, log_error, log_debug, log_verbose,
-        run_command, run_sudo_command, OutputController, VerbosityLevel
-    )
+from .config_manager import ConfigManager
+from .backend_installer import (
+    install_backend, VENV_DIR, STATE_FILE, STATE_DIR,
+    get_install_state, set_install_state, get_all_state,
+    init_state, _cleanup_partial_installation,
+    PARAKEET_VENV_DIR, PARAKEET_SCRIPT, USER_BASE, PYWHISPERCPP_SRC_DIR
+)
+from .provider_registry import (
+    PROVIDERS, get_provider, list_providers, get_provider_models,
+    get_model_config, validate_api_key
+)
+from .credential_manager import (
+    save_credential, get_credential, mask_api_key, CREDENTIALS_FILE
+)
+from .output_control import (
+    log_info, log_success, log_warning, log_error, log_debug, log_verbose,
+    run_command, run_sudo_command, OutputController, VerbosityLevel
+)
+from . import get_project_root
 
 
 # Constants
-HYPRWHSPR_ROOT = os.environ.get('HYPRWHSPR_ROOT', '/usr/lib/hyprwhspr')
+HYPRWHSPR_ROOT = str(get_project_root())
 SERVICE_NAME = 'hyprwhspr.service'
 PARAKEET_SERVICE_NAME = 'parakeet-tdt-0.6b-v3.service'
 YDOTOOL_UNIT = 'ydotool.service'
@@ -168,7 +137,7 @@ def _validate_hyprwhspr_root() -> bool:
     # Check for expected files
     required_files = [
         root_path / 'bin' / 'hyprwhspr',
-        root_path / 'lib' / 'main.py',
+        root_path / 'lib' / 'hyprwhspr' / 'main.py',
     ]
     
     missing_files = []
@@ -2179,7 +2148,7 @@ def validate_command():
     # Check static files
     required_files = [
         Path(HYPRWHSPR_ROOT) / 'bin' / 'hyprwhspr',
-        Path(HYPRWHSPR_ROOT) / 'lib' / 'main.py',
+        Path(HYPRWHSPR_ROOT) / 'lib' / 'hyprwhspr' / 'main.py',
         Path(HYPRWHSPR_ROOT) / 'config' / 'systemd' / SERVICE_NAME,
     ]
     

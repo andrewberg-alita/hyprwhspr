@@ -33,12 +33,8 @@ except (ImportError, ModuleNotFoundError) as e:
     print("  pacman -S python-requests    # system-wide on Arch", file=sys.stderr)
     sys.exit(1)
 
-try:
-    from .config_manager import ConfigManager
-    from .credential_manager import get_credential
-except ImportError:
-    from config_manager import ConfigManager
-    from credential_manager import get_credential
+from .config_manager import ConfigManager
+from .credential_manager import get_credential
 
 
 class WhisperManager:

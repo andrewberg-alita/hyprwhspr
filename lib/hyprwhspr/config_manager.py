@@ -163,12 +163,8 @@ class ConfigManager:
             return False
         
         # Import here to avoid circular dependencies
-        try:
-            from .credential_manager import save_credential
-            from .provider_registry import PROVIDERS
-        except ImportError:
-            from credential_manager import save_credential
-            from provider_registry import PROVIDERS
+        from .credential_manager import save_credential
+        from .provider_registry import PROVIDERS
         
         # Try to identify provider from endpoint URL
         endpoint_url = self.config.get('rest_endpoint_url', '')

@@ -7,17 +7,10 @@ import sys
 import argparse
 from pathlib import Path
 
-# Add the src directory to the Python path
-src_path = Path(__file__).parent / 'src'
-sys.path.insert(0, str(src_path))
-
 # Import output control early to set verbosity
-try:
-    from src.output_control import OutputController, VerbosityLevel
-except ImportError:
-    from output_control import OutputController, VerbosityLevel
+from .output_control import OutputController, VerbosityLevel
 
-from cli_commands import (
+from .cli_commands import (
     setup_command,
     config_command,
     waybar_command,
