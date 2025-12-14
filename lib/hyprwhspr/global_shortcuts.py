@@ -7,7 +7,7 @@ import sys
 import threading
 import select
 import time
-from typing import Callable, Optional, List, Set, Dict
+from typing import Callable, Optional, List, Set, Dict, NamedTuple
 from pathlib import Path
 
 try:
@@ -97,6 +97,7 @@ KEY_ALIASES: dict[str, str] = {
     'menu': 'KEY_MENU',
     'print': 'KEY_PRINT', 'printscreen': 'KEY_SYSRQ', 'prtsc': 'KEY_SYSRQ',
     'pause': 'KEY_PAUSE', 'break': 'KEY_PAUSE',
+    'sysrq': 'KEY_SYSRQ',
 
     # Punctuation and symbol keys
     '.': 'KEY_DOT', 'dot': 'KEY_DOT', 'period': 'KEY_DOT',
@@ -124,15 +125,18 @@ KEY_ALIASES: dict[str, str] = {
     'z': 'KEY_Z',
 }
 
+class Shortcut(NamedTuple):
+    id: str
+    target_keys: Set[int]
+    callback: Callable
+    release_callback: Optional[Callable] = None
+
 
 class GlobalShortcuts:
     """Handles global keyboard shortcuts using evdev for hardware-level capture"""
 
-    def __init__(self, primary_key: str = '<f12>', callback: Optional[Callable] = None, release_callback: Optional[Callable] = None, device_path: Optional[str] = None, grab_keys: bool = True):
-        self.primary_key = primary_key
-        self.callback = callback
+    def __init__(self, device_path: Optional[str] = None, grab_keys: bool = True):
         self.selected_device_path = device_path
-        self.release_callback = release_callback
         self.grab_keys = grab_keys
 
         # Device and event handling
@@ -148,25 +152,50 @@ class GlobalShortcuts:
 
         # State tracking
         self.pressed_keys = set()
-        self.last_trigger_time = 0
-        self.debounce_time = 0.1  # 100ms debounce - shorter for push-to-talk responsiveness
-        self.combination_active = False  # Track if full combination is currently active
-        self.last_release_time = 0  # Debounce for release events
+        self.debounce_time = 0.1  # 100ms debounce
+        self.last_trigger_times = {} # Map shortcut ID -> last trigger time
+        self.last_release_times = {} # Map shortcut ID -> last release time
+        
+        # Track active shortcuts (currently pressed combinations)
+        self.active_shortcuts = set() # Set of shortcut IDs currently considered "active"
 
-        # Track which keys are currently being suppressed (part of active shortcut)
+        # Track which keys are currently being suppressed (part of an active shortcut)
         self.suppressed_keys = set()
-
-        # Parse the primary key combination
-        self.target_keys = self._parse_key_combination(primary_key)
+        
+        # Registered shortcuts
+        self.shortcuts: List[Shortcut] = []
+        
+        # All required input keys across all shortcuts
+        self.all_required_keys = set()
 
         # Initialize keyboard devices
-        self._discover_keyboards()
+        # (Defer this until after shortcuts are added, or call it explicitly)
         
+    def add_shortcut(self, key_string: str, callback: Callable, release_callback: Optional[Callable] = None) -> str:
+        """Add a new shortcut to listen for. Returns the shortcut ID."""
+        target_keys = self._parse_key_combination(key_string)
+        if not target_keys:
+             print(f"[ERROR] Invalid shortcut string: {key_string}")
+             return None
+
+        shortcut_id = f"{key_string}_{len(self.shortcuts)}"
+        shortcut = Shortcut(shortcut_id, target_keys, callback, release_callback)
+        self.shortcuts.append(shortcut)
+        
+        # Update set of all keys we care about
+        self.all_required_keys.update(target_keys)
+        
+        return shortcut_id
+
     def _discover_keyboards(self):
         """Discover and initialize input devices that can emit the configured shortcut"""
         self.devices = []
         self.device_fds = {}
         
+        if not self.shortcuts:
+            print("[WARN] No shortcuts registered before discovering keyboards")
+            return
+
         try:
             # Find all input devices
             all_device_paths = evdev.list_devices()
@@ -192,29 +221,36 @@ class GlobalShortcuts:
                 # Require EV_KEY events
                 capabilities = device.capabilities()
                 if ecodes.EV_KEY not in capabilities:
-                    if self.selected_device_path:
-                        print(f"[ERROR] Selected device '{device.name}' ({device.path}) does not support keyboard events (EV_KEY)")
-                        print("[ERROR] This device cannot be used for keyboard shortcuts")
-                        device.close()
-                        return
                     device.close()
                     continue
                 
-                # Check that device can emit ALL keys required for the shortcut
+                # Check that device can emit ALL keys required for AT LEAST ONE shortcut
                 available_keys = set(capabilities[ecodes.EV_KEY])
-                if not self.target_keys.issubset(available_keys):
-                    if self.selected_device_path:
-                        missing_keys = self.target_keys - available_keys
-                        missing_key_names = [self._keycode_to_name(k) for k in missing_keys]
-                        print(f"[ERROR] Selected device '{device.name}' ({device.path}) cannot emit all keys required for shortcut '{self.primary_key}'")
-                        print(f"[ERROR] Missing keys: {', '.join(missing_key_names)}")
-                        print("[ERROR] This device is incompatible with the configured shortcut")
-                        device.close()
-                        return
-                    device.close()
-                    continue
                 
-                # Device can emit all required keys - test if we can grab it
+                # Check if device is potentially useful
+                # For simplicity, we just check if it has keyboard capabilities basically
+                # but ideally we'd check if it covers the keys for at least one shortcut.
+                # However, modifier keys might be on one device and letter on another?
+                # Probably not common. Let's assume a single device needs to support the content.
+                
+                can_emit_any_shortcut = False
+                for shortcut in self.shortcuts:
+                    if shortcut.target_keys.issubset(available_keys):
+                        can_emit_any_shortcut = True
+                        break
+                
+                if not can_emit_any_shortcut:
+                    # If this device can't fully support ANY configured shortcut, verify if it is missing essential keys
+                    # If we explicitly selected it, warn
+                    if self.selected_device_path:
+                         print(f"[WARN] Selected device '{device.name}' doesn't seem to support all keys for the configured shortcuts")
+                    
+                    # We might skip it, or include it anyway? Safe to skip if strict.
+                    if not self.selected_device_path: 
+                        device.close()
+                        continue
+                
+                # Device seems valid - test if we can grab it
                 try:
                     device.grab()
                     device.ungrab()
@@ -229,12 +265,9 @@ class GlobalShortcuts:
                 except (OSError, IOError) as e:
                     if self.selected_device_path:
                         print(f"[ERROR] Cannot access selected device '{device.name}' ({device.path}): {e}")
-                        print("[ERROR] This usually means you need root or input group membership")
-                        print("[ERROR]   Run: sudo usermod -aG input $USER (then log out and back in)")
                         device.close()
                         return
                     print(f"[WARN] Cannot access device {device.name}: {e}")
-                    print("[WARN]   This usually means you need root or input group membership")
                     device.close()
                         
         except Exception as e:
@@ -243,15 +276,7 @@ class GlobalShortcuts:
             traceback.print_exc()
             
         if not self.devices:
-            if self.selected_device_path:
-                # This shouldn't happen if we handled all cases above, but just in case
-                print(f"[ERROR] Selected device {self.selected_device_path} could not be initialized")
-            else:
-                print("[ERROR] No accessible devices found that can emit the configured shortcut!")
-                print("[ERROR] Solutions:")
-                print("[ERROR]   1. Add yourself to 'input' group: sudo usermod -aG input $USER")
-                print("[ERROR]   2. Disable key grabbing in config (grab_keys: false)")
-                print(f"[ERROR]   3. Check that your shortcut '{self.primary_key}' uses keys available on your keyboard")
+            print("[ERROR] No accessible devices found that can emit the configured shortcuts!")
     
     def _parse_key_combination(self, key_string: str) -> Set[int]:
         """Parse a key combination string into a set of evdev key codes"""
@@ -271,23 +296,12 @@ class GlobalShortcuts:
                 keys.add(keycode)
             else:
                 print(f"Warning: Could not parse key '{part}' in '{key_string}'")
+                return None # Fail on invalid key
                 
-        # Default to F12 if no keys parsed
-        if not keys:
-            print(f"Warning: Could not parse key combination '{key_string}', defaulting to F12")
-            keys.add(ecodes.KEY_F12)
-            
         return keys
     
     def _string_to_keycode(self, key_string: str) -> Optional[int]:
-        """Convert a human-friendly key string into an evdev keycode.
-        
-        Tries local aliases first, then falls back to evdev-style KEY_* names.
-        This hybrid approach supports both user-friendly names (ctrl, super, etc.)
-        and direct evdev key names (KEY_COMMA, KEY_1, etc.).
-        
-        Returns None if no matching keycode is found.
-        """
+        """Convert a human-friendly key string into an evdev keycode."""
         original = key_string
         key_string = key_string.lower().strip()
         
@@ -296,7 +310,6 @@ class GlobalShortcuts:
             key_name = KEY_ALIASES[key_string]
         else:
             # 2. Try as direct evdev KEY_* name
-            # Can use any evdev key name directly
             key_name = key_string.upper()
             if not key_name.startswith('KEY_'):
                 key_name = f'KEY_{key_name}'
@@ -305,7 +318,7 @@ class GlobalShortcuts:
         code = ecodes.ecodes.get(key_name)
 
         if code is None:
-            print(f"Warning: Unknown key string '{original}' (resolved to '{key_name}')")
+            # print(f"Warning: Unknown key string '{original}' (resolved to '{key_name}')")
             return None
         
         return code
@@ -332,9 +345,6 @@ class GlobalShortcuts:
                 # Use select to wait for events from any device
                 device_fds = [dev.fd for dev in self.devices]
                 ready_fds, _, _ = select.select(device_fds, [], [], 0.1)
-                
-                # Don't log every event batch - too verbose
-                # Only log if we're debugging a specific issue
                 
                 for fd in ready_fds:
                     if fd in self.device_fds:
@@ -377,37 +387,46 @@ class GlobalShortcuts:
         """Process individual keyboard events"""
         if event.type == ecodes.EV_KEY:
             key_event = categorize(event)
-            key_name = self._keycode_to_name(event.code)
             should_suppress = False
 
             if key_event.keystate == key_event.key_down:
                 # Key pressed
                 self.pressed_keys.add(event.code)
 
-                # Only suppress if pressing this key COMPLETES the shortcut combination
-                # AND no extra modifiers are held (e.g., don't suppress for SUPER+SHIFT+.)
-                if event.code in self.target_keys and self.target_keys.issubset(self.pressed_keys):
-                    extra_modifiers = (self.pressed_keys - self.target_keys) & self.MODIFIER_KEYS
-                    if len(extra_modifiers) == 0 and event.code not in self.MODIFIER_KEYS:
-                        # Full shortcut with no extra modifiers - suppress this completing key
-                        should_suppress = True
-                        self.suppressed_keys.add(event.code)
-
-                self._check_shortcut_combination()
+                # Check if this key completes ANY configured shortcut
+                matched_shortcut = False
+                for shortcut in self.shortcuts:
+                    if event.code in shortcut.target_keys and shortcut.target_keys.issubset(self.pressed_keys):
+                        # Calculate extra modifiers for this specific shortcut
+                        extra_keys = self.pressed_keys - shortcut.target_keys
+                        extra_modifiers = extra_keys & self.MODIFIER_KEYS
+                        
+                        # Only suppress if this key completes a VALID shortcut (no extra modifiers)
+                        if len(extra_modifiers) == 0:
+                            # This key completes a shortcut!
+                            # Suppress it if it's not a modifier itself (to be safe? usually modifiers aren't the final key but possible)
+                            # Actually, we should suppressing the trigger key
+                            if event.code not in self.MODIFIER_KEYS:
+                                should_suppress = True
+                                self.suppressed_keys.add(event.code)
+                            matched_shortcut = True
+                
+                # Now check all combinations to trigger callbacks
+                self._check_all_shortcut_combinations()
 
             elif key_event.keystate == key_event.key_up:
                 # Key released
-                was_combination_active = self.combination_active
+                was_active_map = {sid: (sid in self.active_shortcuts) for sid in [s.id for s in self.shortcuts]}
+                
                 self.pressed_keys.discard(event.code)
 
                 # If this key was suppressed, suppress its release too
-                # But NEVER suppress modifier key releases to prevent stuck keys
                 if event.code in self.suppressed_keys:
                     self.suppressed_keys.discard(event.code)
                     if event.code not in self.MODIFIER_KEYS:
                         should_suppress = True
 
-                self._check_combination_release(was_combination_active)
+                self._check_all_combinations_release(was_active_map)
 
             elif key_event.keystate == 2:  # Key repeat
                 # Suppress repeats for suppressed keys
@@ -420,83 +439,89 @@ class GlobalShortcuts:
                     self.uinput.write(ecodes.EV_KEY, event.code, event.value)
                     self.uinput.syn()
                 except Exception as e:
-                    print(f"Warning: Failed to re-emit key: {e}")
+                    pass
+                    # print(f"Warning: Failed to re-emit key: {e}")
 
         elif self.uinput and self.devices_grabbed:
-            # Pass through non-key events (like EV_SYN, EV_MSC, etc.)
+            # Pass through non-key events
             try:
                 self.uinput.write(event.type, event.code, event.value)
             except:
                 pass
     
-    def _check_shortcut_combination(self):
-        """Check if current pressed keys match target combination"""
-        # Check if target keys are pressed
-        if not self.target_keys.issubset(self.pressed_keys):
-            keys_match = False
-        else:
-            # Target keys are pressed - but check for unwanted extra modifiers
-            # If user presses SUPER+SHIFT+. but shortcut is SUPER+., don't trigger
-            extra_keys = self.pressed_keys - self.target_keys
-            extra_modifiers = extra_keys & self.MODIFIER_KEYS
-            # Only match if no extra modifiers are pressed
-            keys_match = len(extra_modifiers) == 0
+    def _check_all_shortcut_combinations(self):
+        """Check status of all shortcuts"""
+        current_time = time.time()
         
-        if keys_match:
-            current_time = time.time()
+        for shortcut in self.shortcuts:
+            # Check if target keys match
+            if not shortcut.target_keys.issubset(self.pressed_keys):
+                is_match = False
+            else:
+                # Check extras
+                extra_keys = self.pressed_keys - shortcut.target_keys
+                extra_modifiers = extra_keys & self.MODIFIER_KEYS
+                is_match = (len(extra_modifiers) == 0)
             
-            # Only trigger if not already active and debounce time has passed
-            if not self.combination_active and (current_time - self.last_trigger_time > self.debounce_time):
-                self.last_trigger_time = current_time
-                self.combination_active = True
-                self._trigger_callback()
-        else:
-            self.combination_active = False
-    
-    def _trigger_callback(self):
-        """Trigger the callback function"""
-        if self.callback:
+            # Handle activation
+            if is_match:
+                # Get last trigger for this shortcut
+                last_trigger = self.last_trigger_times.get(shortcut.id, 0)
+                
+                if (shortcut.id not in self.active_shortcuts) and (current_time - last_trigger > self.debounce_time):
+                    self.last_trigger_times[shortcut.id] = current_time
+                    self.active_shortcuts.add(shortcut.id)
+                    self._trigger_callback(shortcut)
+            else:
+                if shortcut.id in self.active_shortcuts:
+                     self.active_shortcuts.remove(shortcut.id)
+
+    def _trigger_callback(self, shortcut: Shortcut):
+        """Trigger the callback for a specific shortcut"""
+        if shortcut.callback:
             try:
-                # Run callback in a separate thread to avoid blocking the listener
-                callback_thread = threading.Thread(target=self.callback, daemon=True)
+                callback_thread = threading.Thread(target=shortcut.callback, daemon=True)
                 callback_thread.start()
             except Exception as e:
                 print(f"[ERROR] Error calling shortcut callback: {e}")
-                import traceback
-                traceback.print_exc()
 
-    def _check_combination_release(self, was_combination_active: bool):
-        """Check if combination was released and trigger release callback"""
-        if was_combination_active and not self.target_keys.issubset(self.pressed_keys):
-            current_time = time.time()
+    def _check_all_combinations_release(self, was_active_map: Dict[str, bool]):
+        """Check releases for all shortcuts"""
+        current_time = time.time()
+        
+        for shortcut in self.shortcuts:
+            was_active = was_active_map.get(shortcut.id, False)
             
-            # Implement debouncing for release events
-            if current_time - self.last_release_time > self.debounce_time:
-                self.last_release_time = current_time
-                self.combination_active = False
-                self._trigger_release_callback()
-    
-    def _trigger_release_callback(self):
-        """Trigger the release callback function"""
-        if self.release_callback:
+            # If it was active, and now keys are missing, it's a release event
+            # Note: We check if target_keys are NO LONGER matching
+            if was_active:
+                # Check if it is still valid matches
+                still_matches = shortcut.target_keys.issubset(self.pressed_keys)
+                if not still_matches:
+                    # It was active, now it's not -> Release
+                    last_release = self.last_release_times.get(shortcut.id, 0)
+                    
+                    if current_time - last_release > self.debounce_time:
+                        self.last_release_times[shortcut.id] = current_time
+                        self._trigger_release_callback(shortcut)
+
+    def _trigger_release_callback(self, shortcut: Shortcut):
+        """Trigger the release callback"""
+        if shortcut.release_callback:
             try:
-                # Run callback in a separate thread to avoid blocking the listener
-                callback_thread = threading.Thread(target=self.release_callback, daemon=True)
+                callback_thread = threading.Thread(target=shortcut.release_callback, daemon=True)
                 callback_thread.start()
             except Exception as e:
                 print(f"[ERROR] Error calling shortcut release callback: {e}")
-                import traceback
-                traceback.print_exc()
     
     def start(self) -> bool:
         """Start listening for global shortcuts"""
         if self.is_running:
             return True
 
-        # Rediscover keyboards if devices list is empty
-        if not self.devices:
-            print("Rediscovering keyboard devices...")
-            self._discover_keyboards()
+        # Rediscover keyboards
+        print("Discovering keyboard devices...")
+        self._discover_keyboards()
 
         if not self.devices:
             print("No keyboard devices available")
@@ -516,19 +541,14 @@ class GlobalShortcuts:
 
         except Exception as e:
             print(f"[ERROR] Failed to start global shortcuts: {e}")
-            import traceback
-            traceback.print_exc()
             self._cleanup_key_grabbing()
             return False
 
     def _setup_key_grabbing(self):
         """Set up UInput virtual keyboard and grab physical devices"""
         try:
-            # Create a virtual keyboard that can emit all key events
-            # This will re-emit keys that aren't part of our shortcut
             self.uinput = UInput(name="hyprwhspr-virtual-keyboard")
 
-            # Grab all keyboard devices to intercept their events
             grabbed_count = 0
             for device in self.devices:
                 try:
@@ -539,20 +559,17 @@ class GlobalShortcuts:
 
             if grabbed_count == 0:
                 print("[ERROR] No devices were grabbed! Shortcuts will not work!")
-                print("[ERROR] Try running with sudo or check permissions")
-
+                
             self.devices_grabbed = True
 
         except Exception as e:
             print(f"[ERROR] Could not set up key grabbing: {e}")
-            print("[ERROR] Keys may leak through to applications")
             import traceback
             traceback.print_exc()
             self._cleanup_key_grabbing()
 
     def _cleanup_key_grabbing(self):
         """Clean up UInput and ungrab devices"""
-        # Ungrab all devices
         if self.devices_grabbed:
             for device in self.devices:
                 try:
@@ -561,7 +578,6 @@ class GlobalShortcuts:
                     pass
             self.devices_grabbed = False
 
-        # Close UInput
         if self.uinput:
             try:
                 self.uinput.close()
@@ -580,11 +596,9 @@ class GlobalShortcuts:
             if self.listener_thread and self.listener_thread.is_alive():
                 self.listener_thread.join(timeout=1.0)
 
-            # Clean up key grabbing
             self._cleanup_key_grabbing()
 
-            # Close all devices
-            for device in self.devices[:]:  # Copy list to avoid modification during iteration
+            for device in self.devices[:]:
                 self._remove_device(device)
 
             self.is_running = False
@@ -594,70 +608,7 @@ class GlobalShortcuts:
         except Exception as e:
             print(f"Error stopping global shortcuts: {e}")
     
-    def is_active(self) -> bool:
-        """Check if global shortcuts are currently active"""
-        return self.is_running and self.listener_thread and self.listener_thread.is_alive()
-    
-    def set_callback(self, callback: Callable):
-        """Set the callback function for shortcut activation"""
-        self.callback = callback
-    
-    def update_shortcut(self, new_key: str) -> bool:
-        """Update the shortcut key combination"""
-        try:
-            # Parse the new key combination
-            new_target_keys = self._parse_key_combination(new_key)
-            
-            # Update the configuration
-            self.primary_key = new_key
-            self.target_keys = new_target_keys
-            
-            print(f"Updated global shortcut to: {new_key}")
-            return True
-            
-        except Exception as e:
-            print(f"Failed to update shortcut: {e}")
-            return False
-    
-    def test_shortcut(self) -> bool:
-        """Test if shortcuts are working by temporarily setting a test callback"""
-        original_callback = self.callback
-        test_triggered = threading.Event()
-        
-        def test_callback():
-            print("Test shortcut triggered!")
-            test_triggered.set()
-        
-        # Set test callback
-        self.callback = test_callback
-        
-        print(f"Press {self.primary_key} within 10 seconds to test...")
-        
-        # Wait for test trigger
-        if test_triggered.wait(timeout=10):
-            print("Shortcut test successful!")
-            result = True
-        else:
-            print("ERROR: Shortcut test failed - no trigger detected")
-            result = False
-        
-        # Restore original callback
-        self.callback = original_callback
-        return result
-    
-    def get_status(self) -> dict:
-        """Get the current status of global shortcuts"""
-        return {
-            'is_running': self.is_running,
-            'is_active': self.is_active(),
-            'primary_key': self.primary_key,
-            'target_keys': [self._keycode_to_name(k) for k in self.target_keys],
-            'pressed_keys': [self._keycode_to_name(k) for k in self.pressed_keys],
-            'device_count': len(self.devices)
-        }
-    
     def __del__(self):
-        """Cleanup when object is destroyed"""
         try:
             self.stop()
         except:
@@ -669,35 +620,24 @@ def normalize_key_name(key_name: str) -> str:
     return key_name.lower().strip().replace(' ', '')
 
 def _string_to_keycode_standalone(key_string: str) -> Optional[int]:
-    """Standalone version of string to keycode conversion for use outside GlobalShortcuts class"""
+    """Standalone version of string to keycode conversion"""
     key_string = key_string.lower().strip()
     
-    # 1. Try alias mapping first, easy names
     if key_string in KEY_ALIASES:
         key_name = KEY_ALIASES[key_string]
     else:
-        # 2. Try as direct evdev KEY_* name
         key_name = key_string.upper()
         if not key_name.startswith('KEY_'):
             key_name = f'KEY_{key_name}'
     
-    # 3. Look up the keycode in evdev's complete mapping
     code = ecodes.ecodes.get(key_name)
-    
-    if code is None:
-        return None
-    
     return code
 
 def _parse_key_combination_standalone(key_string: str) -> Set[int]:
-    """Standalone version of key combination parsing for use outside GlobalShortcuts class"""
+    """Standalone version of key combination parsing"""
     keys = set()
     key_lower = key_string.lower().strip()
-    
-    # Remove angle brackets if present
     key_lower = key_lower.replace('<', '').replace('>', '')
-    
-    # Split into parts for modifier + key combinations
     parts = key_lower.split('+')
     
     for part in parts:
@@ -705,34 +645,23 @@ def _parse_key_combination_standalone(key_string: str) -> Set[int]:
         keycode = _string_to_keycode_standalone(part)
         if keycode is not None:
             keys.add(keycode)
-        else:
-            print(f"Warning: Could not parse key '{part}' in '{key_string}'")
-            
-    # Default to F12 if no keys parsed
+        
     if not keys:
-        print(f"Warning: Could not parse key combination '{key_string}', defaulting to F12")
         keys.add(ecodes.KEY_F12)
         
     return keys
 
 def get_available_keyboards(shortcut: Optional[str] = None) -> List[Dict[str, str]]:
-    """Get a list of available input devices that can emit the specified shortcut.
-    
-    If shortcut is None, returns all devices with EV_KEY capabilities.
-    If shortcut is provided, only returns devices that can emit all keys in the shortcut.
-    """
+    """Get a list of available input devices."""
     keyboards = []
     
-    # Parse shortcut if provided
     target_keys = None
     if shortcut:
         target_keys = _parse_key_combination_standalone(shortcut)
     
     try:
         devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
-        
         for device in devices:
-            # Check if device has keyboard capabilities
             capabilities = device.capabilities()
             if ecodes.EV_KEY not in capabilities:
                 device.close()
@@ -740,13 +669,11 @@ def get_available_keyboards(shortcut: Optional[str] = None) -> List[Dict[str, st
             
             available_keys = set(capabilities[ecodes.EV_KEY])
             
-            # If shortcut is provided, check that device can emit all required keys
             if target_keys and not target_keys.issubset(available_keys):
                 device.close()
                 continue
             
             try:
-                # Test if we can access the device
                 device.grab()
                 device.ungrab()
                 
@@ -756,7 +683,6 @@ def get_available_keyboards(shortcut: Optional[str] = None) -> List[Dict[str, st
                     'display_name': f"{device.name} ({device.path})"
                 })
             except (OSError, IOError):
-                # Device not accessible, skip it
                 pass
             finally:
                 device.close()
@@ -766,11 +692,8 @@ def get_available_keyboards(shortcut: Optional[str] = None) -> List[Dict[str, st
     
     return keyboards
 
-
 def test_key_accessibility() -> Dict:
     """Test which keyboard devices are accessible"""
-    print("Testing keyboard device accessibility...")
-    
     results = {
         'accessible_devices': [],
         'inaccessible_devices': [],
@@ -782,11 +705,8 @@ def test_key_accessibility() -> Dict:
         results['total_devices'] = len(devices)
         
         for device in devices:
-            # Check if it's a keyboard
-            capabilities = device.capabilities()
-            if ecodes.EV_KEY in capabilities:
+            if ecodes.EV_KEY in device.capabilities():
                 try:
-                    # Test accessibility
                     device.grab()
                     device.ungrab()
                     results['accessible_devices'].append({
@@ -798,31 +718,8 @@ def test_key_accessibility() -> Dict:
                         'name': device.name,
                         'path': device.path
                     })
-                finally:
-                    device.close()
-                    
-    except Exception as e:
-        print(f"Error testing devices: {e}")
+                device.close()
+    except Exception:
+        pass
     
-    print(f"Found {len(results['accessible_devices'])} accessible keyboard devices")
     return results
-
-
-if __name__ == "__main__":
-    # Simple test when run directly
-    def test_callback():
-        print("Global shortcut activated!")
-    
-    shortcuts = GlobalShortcuts('F12', test_callback)
-    
-    if shortcuts.start():
-        print("Press F12 to test, or Ctrl+C to exit...")
-        try:
-            # Keep the program running
-            import time
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("\nStopping...")
-    
-    shortcuts.stop()

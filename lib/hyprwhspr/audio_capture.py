@@ -313,6 +313,24 @@ class AudioCapture:
             else:
                 return None
     
+    def flush_audio(self) -> Optional[np.ndarray]:
+        """
+        Get the currently recorded audio data and clear the buffer.
+        Used for streaming/VAD to process chunks.
+        """
+        with self.lock:
+            if not self.audio_data:
+                return None
+            
+            # Concatenate all audio chunks
+            audio_array = np.concatenate(self.audio_data, axis=0)
+            
+            # Clear the buffer
+            self.audio_data = []
+            
+            return audio_array
+
+    
     def _record_audio(self):
         """Internal method to record audio in a separate thread"""
         try:

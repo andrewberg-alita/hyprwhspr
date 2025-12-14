@@ -113,6 +113,22 @@ class TextInjector:
             # No fallback needed - paste strategy is always reliable
             return False
 
+    def copy_to_clipboard(self, text: str) -> bool:
+        """
+        Copy text to clipboard without injecting it.
+        
+        Args:
+            text: Text to copy
+            
+        Returns:
+            True if successful
+        """
+        if not text:
+            return False
+            
+        processed_text = self._preprocess_text(text).rstrip("\r\n") + ' '
+        return self._inject_via_clipboard(processed_text)
+
     # ------------------------ Helpers ------------------------
 
     def _preprocess_text(self, text: str) -> str:
@@ -166,7 +182,8 @@ class TextInjector:
         }
 
         for pattern, replacement in replacements.items():
-            processed = re.sub(pattern, replacement, processed, flags=re.IGNORECASE)
+            # Use lambda to avoid regex escape processing in replacement string
+            processed = re.sub(pattern, lambda m, r=replacement: r, processed, flags=re.IGNORECASE)
 
         # Collapse runs of whitespace, preserve intentional newlines
         processed = re.sub(r'[ \t]+', ' ', processed)
@@ -190,7 +207,8 @@ class TextInjector:
         for original, replacement in word_overrides.items():
             if original and replacement:
                 pattern = r'\b' + re.escape(original) + r'\b'
-                processed = re.sub(pattern, replacement, processed, flags=re.IGNORECASE)
+                # Use lambda to avoid regex escape processing in replacement string
+                processed = re.sub(pattern, lambda m, r=replacement: r, processed, flags=re.IGNORECASE)
 
         return processed
 

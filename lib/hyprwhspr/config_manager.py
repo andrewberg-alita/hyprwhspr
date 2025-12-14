@@ -6,6 +6,8 @@ Handles loading, saving, and managing application settings
 import json
 from pathlib import Path
 from typing import Any, Dict
+import tomllib
+import tomli_w
 
 
 class ConfigManager:
@@ -36,12 +38,19 @@ class ConfigManager:
             'rest_headers': {},                # Additional HTTP headers for remote transcription
             'rest_body': {},                   # Additional body fields for remote transcription
             'rest_timeout': 30,                # Request timeout in seconds
-            'rest_audio_format': 'wav'         # Audio format for remote transcription
+            'rest_audio_format': 'wav',        # Audio format for remote transcription
+
+            # Streaming / VAD settings
+            'streaming_mode': True,            # Enable VAD-based streaming transcription
+            'silence_threshold': 0.02,         # RMS threshold for silence detection
+            'silence_duration': 0.6,           # Seconds of silence to trigger transcription
+            'min_audio_duration': 0.5,         # Minimum duration to transcribe
         }
         
         # Set up config directory and file path
         self.config_dir = Path.home() / '.config' / 'hyprwhspr'
-        self.config_file = self.config_dir / 'config.json'
+        self.config_file = self.config_dir / 'config.toml'
+        self.json_config_file = self.config_dir / 'config.json'
         
         # Current configuration (starts with defaults)
         self.config = self.default_config.copy()
@@ -64,33 +73,147 @@ class ConfigManager:
                 print(f"Warning: Could not create config directory: {e}")
     
     def _load_config(self):
-        """Load configuration from file"""
+        """Load configuration from file (TOML preferred, JSON migration supported)"""
         try:
             if self.config_file.exists():
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    loaded_config = json.load(f)
-                    
-                # Merge loaded config with defaults (preserving any new default keys)
+                with open(self.config_file, 'rb') as f:
+                    loaded_config = tomllib.load(f)
+                
+                # Merge loaded config with defaults
                 self.config.update(loaded_config)
+                
+                # Normalize 'None' values back if they were empty strings or missing
+                # (Optional: depends on how we handle them)
+                if self.config.get('language') == "":
+                    self.config['language'] = None
                 
                 # Attempt automatic migration of API key if needed
                 self.migrate_api_key_to_credential_manager()
                 
                 print(f"Configuration loaded from {self.config_file}")
-            else:
-                print("No existing configuration found, using defaults")
-                # Save default configuration
+            
+            elif self.json_config_file.exists():
+                print("Found legacy config.json, migrating to config.toml...")
+                with open(self.json_config_file, 'r', encoding='utf-8') as f:
+                    try:
+                        loaded_json = json.load(f)
+                        self.config.update(loaded_json)
+                    except json.JSONDecodeError:
+                        print("Warning: Could not parse legacy config.json")
+                
+                # Migrate API key first
+                self.migrate_api_key_to_credential_manager()
+                
+                # Save as TOML (this will create config.toml)
+                # We use the initial template if we can to preserve comments, 
+                # but since we have custom values, we might have to just dump.
+                # Use tomli-w dump for migration to ensure correctness of values.
                 self.save_config()
+                
+                # Rename old json
+                legacy_backup = self.json_config_file.with_suffix('.json.bak')
+                self.json_config_file.rename(legacy_backup)
+                print(f"Migrated config.json to {legacy_backup}")
+                
+            else:
+                print("No existing configuration found, creating default config.toml")
+                # Save default configuration with comments
+                self._save_initial_config_with_comments()
                 
         except Exception as e:
             print(f"Warning: Could not load configuration: {e}")
             print("Using default configuration")
     
-    def save_config(self) -> bool:
-        """Save current configuration to file"""
+    def _save_initial_config_with_comments(self):
+        """Save a new config.toml with helpful comments"""
+        toml_content = """# hyprwhspr configuration
+# =======================
+
+# Primary keyboard shortcut to toggle recording
+# Examples: "SUPER+ALT+D", "CTRL+SPACE", "F9"
+primary_shortcut = "SUPER+ALT+D"
+
+# Push-to-talk mode
+# false: Toggle mode (press to start, press to stop)
+# true:  Hold to record, release to stop
+push_to_talk = false
+
+# Whisper model to use
+# Options: "tiny", "base", "small", "medium", "large", "large-v3"
+# Appendix ".en" for English-only models (e.g. "base.en") which are faster.
+model = "base"
+
+# Number of threads for Whisper processing
+threads = 4
+
+# Language code for transcription
+# "" (empty) = Auto-detect
+# Examples: "en", "nl", "fr", "de", "es"
+language = ""
+
+# Clipboard behavior
+# false: Keep transcribed text in clipboard (default)
+# true:  Clear clipboard after a delay
+clipboard_behavior = false
+
+# Delay in seconds before clearing clipboard (if enabled)
+clipboard_clear_delay = 5.0
+
+# Paste mode
+# "ctrl_shift": Use Ctrl+Shift+V (Classic terminal style)
+# "ctrl":       Use Ctrl+V (Standard GUI style)
+# "super":      Use Super+V (Custom)
+paste_mode = "ctrl_shift"
+shift_paste = true
+
+# Word overrides
+# Dictionary of word replacements: {"original" = "replacement"}
+[word_overrides]
+# "example" = "replacement"
+
+# Transcription backend settings
+# "pywhispercpp": Local, fast, CPU optimized (default)
+# "cpu", "nvidia", "amd": Specific hardware targets
+# "rest-api": Remote server (e.g. cloud or parakeet)
+transcription_backend = "pywhispercpp"
+
+# REST API settings (only used if transcription_backend = "rest-api")
+rest_endpoint_url = ""
+rest_timeout = 30
+rest_audio_format = "wav"
+
+[rest_headers]
+# "Authorization" = "Bearer ..."
+
+[rest_body]
+# "model" = "custom_model"
+"""
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(self.config, f, indent=2)
+                f.write(toml_content)
+            print(f"Default configuration saved to {self.config_file}")
+            return True
+        except Exception as e:
+            print(f"Error: Could not save default configuration: {e}")
+            return False
+
+    def save_config(self) -> bool:
+        """Save current configuration to file (Warning: strips comments)"""
+        try:
+            # Prepare config for TOML (remove None values)
+            save_data = {}
+            for k, v in self.config.items():
+                if v is None:
+                    # Special cases for keys we want to keep as empty strings
+                    if k in ['language', 'rest_endpoint_url']:
+                        save_data[k] = ""
+                    else:
+                        continue # Skip other None values (like rest_api_key)
+                else:
+                    save_data[k] = v
+                 
+            with open(self.config_file, 'wb') as f:
+                tomli_w.dump(save_data, f)
             print(f"Configuration saved to {self.config_file}")
             return True
         except Exception as e:

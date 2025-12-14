@@ -8,6 +8,7 @@ import sys
 import time
 import threading
 import os
+import queue
 import fcntl
 import atexit
 from pathlib import Path
@@ -46,6 +47,11 @@ class hyprwhsprApp:
         self.is_processing = False
         self.current_transcription = ""
         self.audio_level_thread = None
+        
+        # Transcription queue for streaming
+        self.transcription_queue = queue.Queue()
+        self.worker_thread = threading.Thread(target=self._transcription_worker, daemon=True)
+        self.worker_thread.start()
 
         # Set up global shortcuts (needed for headless operation)
         self._setup_global_shortcuts()
@@ -53,42 +59,70 @@ class hyprwhsprApp:
     def _setup_global_shortcuts(self):
         """Initialize global keyboard shortcuts"""
         try:
-            shortcut_key = self.config.get_setting("primary_shortcut", "Super+Alt+D")
+            primary_shortcut = self.config.get_setting("primary_shortcut", "Super+Alt+D")
+            clipboard_shortcut = self.config.get_setting("clipboard_shortcut", "Super+Alt+C")
             push_to_talk = self.config.get_setting("push_to_talk", False)
             grab_keys = self.config.get_setting("grab_keys", True)
             selected_device_path = self.config.get_setting("selected_device_path", None)
 
+            # Initialize the handler
+            self.global_shortcuts = GlobalShortcuts(
+                device_path=selected_device_path,
+                grab_keys=grab_keys
+            )
+            
+            # Register shortcuts based on mode
             if push_to_talk:
-                # Push-to-talk mode: register both press and release callbacks
-                self.global_shortcuts = GlobalShortcuts(
-                    shortcut_key,
-                    self._on_shortcut_triggered,
-                    self._on_shortcut_released,
-                    device_path=selected_device_path,
-                    grab_keys=grab_keys,
+                # Push-to-talk: press to start, release to stop
+                self.global_shortcuts.add_shortcut(
+                    primary_shortcut, 
+                    self._on_primary_trigger,
+                    self._on_shortcut_released
+                )
+                self.global_shortcuts.add_shortcut(
+                    clipboard_shortcut,
+                    self._on_clipboard_trigger,
+                    self._on_shortcut_released
                 )
             else:
-                # Toggle mode: only register press callback
-                self.global_shortcuts = GlobalShortcuts(
-                    shortcut_key,
-                    self._on_shortcut_triggered,
-                    device_path=selected_device_path,
-                    grab_keys=grab_keys,
+                # Toggle mode: press to toggle
+                self.global_shortcuts.add_shortcut(
+                    primary_shortcut,
+                    self._on_primary_trigger
                 )
+                self.global_shortcuts.add_shortcut(
+                    clipboard_shortcut,
+                    self._on_clipboard_trigger
+                )
+                
+            print(f"[INFO] Shortcuts initialized:")
+            print(f"  • Dictate: {primary_shortcut}")
+            print(f"  • Clipboard: {clipboard_shortcut}")
+            
         except Exception as e:
             print(f"[ERROR] Failed to initialize global shortcuts: {e}")
             self.global_shortcuts = None
 
-    def _on_shortcut_triggered(self):
-        """Handle global shortcut trigger"""
+    def _on_primary_trigger(self):
+        """Handle primary (dictation) shortcut trigger"""
+        self.output_mode = 'inject'
+        self._handle_trigger()
+
+    def _on_clipboard_trigger(self):
+        """Handle clipboard shortcut trigger"""
+        self.output_mode = 'clipboard'
+        self._handle_trigger()
+
+    def _handle_trigger(self):
+        """Common trigger handler"""
         push_to_talk = self.config.get_setting("push_to_talk", False)
 
         if push_to_talk:
-            # Push-to-talk mode: only start recording on key press
+            # Push-to-talk: start if not recording
             if not self.is_recording:
                 self._start_recording()
         else:
-            # Toggle mode: start/stop recording
+            # Toggle mode: toggle recording
             if self.is_recording:
                 self._stop_recording()
             else:
@@ -119,7 +153,7 @@ class hyprwhsprApp:
             # Start audio capture
             self.audio_capture.start_recording()
             
-            # Start audio level monitoring thread
+            # Start audio level monitoring thread (handles VAD)
             self._start_audio_level_monitoring()
             
         except Exception as e:
@@ -148,18 +182,31 @@ class hyprwhsprApp:
             self.audio_manager.play_stop_sound()
             
             if audio_data is not None:
-                self._process_audio(audio_data)
+                # Queue the final chunk
+                self._enqueue_audio(audio_data)
             else:
-                print("[WARN] No audio data captured")
+                # If everything was flushed already via VAD, that's fine.
+                pass
                 
         except Exception as e:
             print(f"[ERROR] Error stopping recording: {e}")
 
-    def _process_audio(self, audio_data):
-        """Process captured audio through Whisper"""
-        if self.is_processing:
-            return
+    def _enqueue_audio(self, audio_data):
+        """Queue captured audio for processing"""
+        self.transcription_queue.put(audio_data)
 
+    def _transcription_worker(self):
+        """Worker thread to process audio chunks from the queue"""
+        while True:
+            try:
+                audio_data = self.transcription_queue.get()
+                self._process_audio_chunk(audio_data)
+                self.transcription_queue.task_done()
+            except Exception as e:
+                print(f"[ERROR] in transcription worker: {e}")
+
+    def _process_audio_chunk(self, audio_data):
+        """Process a single audio chunk through Whisper"""
         try:
             self.is_processing = True
             
@@ -167,12 +214,18 @@ class hyprwhsprApp:
             transcription = self.whisper_manager.transcribe_audio(audio_data)
             
             if transcription and transcription.strip():
+                # self.current_transcription is mostly for UI/debug, but we can track it
                 self.current_transcription = transcription.strip()
                 
-                # Inject text
-                self._inject_text(self.current_transcription)
+                # Output text based on mode
+                if self.output_mode == 'clipboard':
+                    self._copy_to_clipboard(self.current_transcription)
+                else:
+                    self._inject_text(self.current_transcription)
             else:
-                print("[WARN] No transcription generated")
+                if len(audio_data) > 32000: # Don't warn for tiny chunks
+                     # print("[WARN] No transcription generated")
+                     pass
                 
         except Exception as e:
             print(f"[ERROR] Error processing audio: {e}")
@@ -185,6 +238,13 @@ class hyprwhsprApp:
             self.text_injector.inject_text(text)
         except Exception as e:
             print(f"[ERROR] Text injection failed: {e}")
+
+    def _copy_to_clipboard(self, text):
+        """Copy transcribed text to clipboard"""
+        try:
+            self.text_injector.copy_to_clipboard(text)
+        except Exception as e:
+            print(f"[ERROR] Clipboard copy failed: {e}")
 
     def _write_recording_status(self, is_recording):
         """Write recording status to file for tray script"""
@@ -203,7 +263,7 @@ class hyprwhsprApp:
             print(f"[WARN] Failed to write recording status: {e}")
 
     def _start_audio_level_monitoring(self):
-        """Start monitoring and writing audio levels to file"""
+        """Start monitoring audio levels and handle VAD"""
         if self.audio_level_thread and self.audio_level_thread.is_alive():
             return
         
@@ -211,13 +271,49 @@ class hyprwhsprApp:
             level_file = Path.home() / '.config' / 'hyprwhspr' / 'audio_level'
             level_file.parent.mkdir(parents=True, exist_ok=True)
             
+            # VAD variables
+            current_silence_duration = 0.0
+            streaming_mode = self.config.get_setting('streaming_mode', True)
+            silence_threshold = self.config.get_setting('silence_threshold', 0.02)
+            silence_duration_trigger = self.config.get_setting('silence_duration', 0.6)
+            min_audio_duration = self.config.get_setting('min_audio_duration', 0.5)
+            
             while self.is_recording:
                 try:
-                    level = self.audio_capture.get_audio_level()
+                    # Get raw level (approx RMS)
+                    # current_level is updated by AudioCapture in background thread
+                    level = self.audio_capture.current_level
+                    
+                    # Write scaled level for UI
+                    scaled_level = min(1.0, level * 10)
                     with open(level_file, 'w') as f:
-                        f.write(f'{level:.3f}')
+                        f.write(f'{scaled_level:.3f}')
+                    
+                    # VAD Logic - DISABLED by user request (chunking causes issues)
+                    # if streaming_mode:
+                    #     if level < silence_threshold:
+                    #         current_silence_duration += 0.1
+                    #     else:
+                    #         current_silence_duration = 0.0
+                    #     
+                    #     if current_silence_duration >= silence_duration_trigger:
+                    #         # Silence detected - flush!
+                    #         
+                    #         # Check if we have enough data (we can peek by checking flush)
+                    #         # Actually, just flush. If it's empty/small, consumer will ignore.
+                    #         chunk = self.audio_capture.flush_audio()
+                    #         
+                    #         if chunk is not None:
+                    #             duration = len(chunk) / 16000
+                    #             if duration >= min_audio_duration:
+                    #                 print(f"[VAD] Silence detected ({current_silence_duration:.1f}s), flushing {duration:.2f}s audio")
+                    #                 self._enqueue_audio(chunk)
+                    #         
+                    #         current_silence_duration = 0.0
+
                 except Exception as e:
                     # Silently fail - don't spam errors
+                    # print(f"VAD Error: {e}")
                     pass
                 time.sleep(0.1)  # Update 10 times per second
             
